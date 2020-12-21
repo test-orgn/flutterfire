@@ -2,9 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#import <firebase_core/FLTFirebasePluginRegistry.h>
+#import <Firebase/Firebase.h>
+
 #import "FirebaseRemoteConfigPlugin.h"
 
-#import <Firebase/Firebase.h>
+NSString *const kFirebaseRemoteConfigChannelName = @"plugins.flutter.io/firebase_remote_config";
 
 @interface FirebaseRemoteConfigPlugin ()
 @property(nonatomic, retain) FlutterMethodChannel *channel;
@@ -12,11 +15,29 @@
 
 @implementation FirebaseRemoteConfigPlugin
 
++ (instancetype)sharedInstance {
+  static dispatch_once_t onceToken;
+  static FirebaseRemoteConfigPlugin *instance;
+
+  dispatch_once(&onceToken, ^{
+    instance = [[FirebaseRemoteConfigPlugin alloc] init];
+    [[FLTFirebasePluginRegistry sharedInstance] registerFirebasePlugin:instance];
+  });
+
+  return instance;
+}
+
+- (instancetype)init {
+  self = [super init];
+  return self;
+}
+
 + (void)registerWithRegistrar:(NSObject<FlutterPluginRegistrar> *)registrar {
   FlutterMethodChannel *channel =
-      [FlutterMethodChannel methodChannelWithName:@"plugins.flutter.io/firebase_remote_config"
+      [FlutterMethodChannel methodChannelWithName:kFirebaseRemoteConfigChannelName
                                   binaryMessenger:[registrar messenger]];
-  FirebaseRemoteConfigPlugin *instance = [[FirebaseRemoteConfigPlugin alloc] init];
+  FirebaseRemoteConfigPlugin *instance = [FirebaseRemoteConfigPlugin sharedInstance];
+
   [registrar addMethodCallDelegate:instance channel:channel];
 
   SEL sel = NSSelectorFromString(@"registerLibrary:withVersion:");
@@ -25,86 +46,52 @@
   }
 }
 
-- (instancetype)init {
-  self = [super init];
-  return self;
+- (void)detachFromEngineForRegistrar:(NSObject <FlutterPluginRegistrar> *)registrar {
+  self.channel = nil;
+}
+
+- (FIRRemoteConfig *_Nullable)getFIRRemoteConfigFromArguments:(NSDictionary *)arguments {
+  NSString *appName = arguments[@"appName"];
+  FIRApp *app = [FLTFirebasePlugin firebaseAppNamed:appName];
+  return [FIRRemoteConfig remoteConfigWithApp:app];
 }
 
 - (void)handleMethodCall:(FlutterMethodCall *)call result:(FlutterResult)result {
-  if ([@"RemoteConfig#instance" isEqualToString:call.method]) {
-    FIRRemoteConfig *remoteConfig = [FIRRemoteConfig remoteConfig];
-    FIRRemoteConfigSettings *firRemoteConfigSettings = [remoteConfig configSettings];
-    NSMutableDictionary *resultDict = [[NSMutableDictionary alloc] init];
-
-    resultDict[@"lastFetchTime"] = [[NSNumber alloc]
-        initWithLong:(long)[[remoteConfig lastFetchTime] timeIntervalSince1970] * 1000];
-    resultDict[@"lastFetchStatus"] =
-        [self mapLastFetchStatus:(FIRRemoteConfigFetchStatus)[remoteConfig lastFetchStatus]];
-    resultDict[@"inDebugMode"] =
-        [[NSNumber alloc] initWithBool:[firRemoteConfigSettings isDeveloperModeEnabled]];
-
-    resultDict[@"parameters"] = [self getConfigParameters];
-
-    result(resultDict);
+  FIRRemoteConfig *remoteConfig = [self getFIRRemoteConfigFromArguments:call.arguments];
+  if ([@"RemoteConfig#ensureInitialized" isEqualToString:call.method]) {
+    [remoteConfig ensureInitializedWithCompletionHandler:^(NSError * _Nullable initializationError) {
+      result(nil);
+    }];
+  } else if([@"RemoteConfig#activate" isEqualToString:call.method]) {
+    [remoteConfig activateWithCompletion:^(BOOL configActivated, NSError *_Nullable activateError) {
+      result(@(configActivated));
+    }];
+  } else if ([@"RemoteConfig#getAll" isEqualToString:call.method]) {
+    NSDictionary *parameters = [self getAllParameters:remoteConfig];
+    result(parameters);
+  } else if ([@"RemoteConfig#fetch" isEqualToString:call.method] ) {
+    [remoteConfig fetchWithCompletionHandler:^(FIRRemoteConfigFetchStatus status, NSError *error) {
+      result(nil);
+    }];
+  } else if ([@"RemoteConfig#fetchAndActivate" isEqualToString:call.method]) {
+    [remoteConfig fetchAndActivateWithCompletionHandler:^(FIRRemoteConfigFetchAndActivateStatus status, NSError *error) {
+      if (status == FIRRemoteConfigFetchAndActivateStatusSuccessFetchedFromRemote) {
+        result([NSNumber numberWithBool:TRUE]);
+      } else {
+        result([NSNumber numberWithBool:FALSE]);
+      }
+    }];
   } else if ([@"RemoteConfig#setConfigSettings" isEqualToString:call.method]) {
-    FIRRemoteConfig *remoteConfig = [FIRRemoteConfig remoteConfig];
-    bool debugMode = (bool)call.arguments[@"debugMode"];
-    FIRRemoteConfigSettings *remoteConfigSettings =
-        [[FIRRemoteConfigSettings alloc] initWithDeveloperModeEnabled:debugMode];
+    NSNumber *fetchTimeout = call.arguments[@"fetchTimeout"];
+    NSNumber *minimumFetchInterval = call.arguments[@"minimumFetchInterval"];
+    NSLog(@"fetchTimeout: %@", fetchTimeout);
+    NSLog(@"minimumFetchInterval: %@", minimumFetchInterval);
+    FIRRemoteConfigSettings *remoteConfigSettings = [[FIRRemoteConfigSettings alloc] init];
+    remoteConfigSettings.fetchTimeout = [fetchTimeout intValue];
+    remoteConfigSettings.minimumFetchInterval = [minimumFetchInterval intValue];
     [remoteConfig setConfigSettings:remoteConfigSettings];
     result(nil);
-  } else if ([@"RemoteConfig#fetch" isEqualToString:call.method]) {
-    FIRRemoteConfig *remoteConfig = [FIRRemoteConfig remoteConfig];
-    long expiration = (long)call.arguments[@"expiration"];
-
-    [remoteConfig
-        fetchWithExpirationDuration:expiration
-                  completionHandler:^(FIRRemoteConfigFetchStatus status, NSError *error) {
-                    NSNumber *lastFetchTime = [[NSNumber alloc]
-                        initWithLong:(long)[[remoteConfig lastFetchTime] timeIntervalSince1970] *
-                                     1000];
-                    NSString *lastFetchStatus =
-                        [self mapLastFetchStatus:(FIRRemoteConfigFetchStatus)[remoteConfig
-                                                                                  lastFetchStatus]];
-                    NSMutableDictionary *resultDict = [[NSMutableDictionary alloc] init];
-                    resultDict[@"lastFetchTime"] = lastFetchTime;
-                    resultDict[@"lastFetchStatus"] = lastFetchStatus;
-
-                    if (status != FIRRemoteConfigFetchStatusSuccess) {
-                      FlutterError *flutterError;
-                      if (status == FIRRemoteConfigFetchStatusThrottled) {
-                        int mills =
-                            [[error.userInfo
-                                valueForKey:FIRRemoteConfigThrottledEndTimeInSecondsKey] intValue] *
-                            1000;
-                        resultDict[@"fetchThrottledEnd"] = [[NSNumber alloc] initWithInt:mills];
-                        NSString *errorMessage =
-                            @"Fetch has been throttled. See the error's fetchThrottledEnd "
-                             "field for throttle end time.";
-                        flutterError = [FlutterError errorWithCode:@"fetchFailedThrottled"
-                                                           message:errorMessage
-                                                           details:resultDict];
-                      } else {
-                        NSString *errorMessage = @"Unable to complete fetch. Reason is unknown "
-                                                  "but this could be due to lack of connectivity.";
-                        flutterError = [FlutterError errorWithCode:@"fetchFailed"
-                                                           message:errorMessage
-                                                           details:resultDict];
-                      }
-                      result(flutterError);
-                    } else {
-                      result(resultDict);
-                    }
-                  }];
-  } else if ([@"RemoteConfig#activate" isEqualToString:call.method]) {
-    BOOL newConfig = [[FIRRemoteConfig remoteConfig] activateFetched];
-    NSDictionary *parameters = [self getConfigParameters];
-    NSMutableDictionary *resultDict = [[NSMutableDictionary alloc] init];
-    resultDict[@"newConfig"] = [NSNumber numberWithBool:newConfig];
-    resultDict[@"parameters"] = parameters;
-    result(resultDict);
-  } else if ([@"RemoteConfig#setDefaults" isEqualToString:call.method]) {
-    FIRRemoteConfig *remoteConfig = [FIRRemoteConfig remoteConfig];
+  } else if ([@"RemoteConfig#setDefaults" isEqualToString:call.method]){
     NSDictionary *defaults = call.arguments[@"defaults"];
     [remoteConfig setDefaults:defaults];
     result(nil);
@@ -113,29 +100,24 @@
   }
 }
 
+- (NSDictionary *)getAllParameters:(FIRRemoteConfig *)remoteConfig {
+  NSMutableSet *keySet = [[NSMutableSet alloc] init];
+  [keySet addObjectsFromArray:[remoteConfig allKeysFromSource:FIRRemoteConfigSourceStatic]];
+  [keySet addObjectsFromArray:[remoteConfig allKeysFromSource:FIRRemoteConfigSourceDefault]];
+  [keySet addObjectsFromArray:[remoteConfig allKeysFromSource:FIRRemoteConfigSourceRemote]];
+
+  NSMutableDictionary *parameters = [[NSMutableDictionary alloc] init];
+  for (NSString *key in keySet) {
+    parameters[key] = [self createRemoteConfigValueDict: [remoteConfig configValueForKey:key]];
+  }
+  return parameters;
+}
+
 - (NSMutableDictionary *)createRemoteConfigValueDict:(FIRRemoteConfigValue *)remoteConfigValue {
   NSMutableDictionary *valueDict = [[NSMutableDictionary alloc] init];
   valueDict[@"value"] = [FlutterStandardTypedData typedDataWithBytes:[remoteConfigValue dataValue]];
   valueDict[@"source"] = [self mapValueSource:[remoteConfigValue source]];
   return valueDict;
-}
-
-- (NSDictionary *)getConfigParameters {
-  FIRRemoteConfig *remoteConfig = [FIRRemoteConfig remoteConfig];
-  NSMutableDictionary *parameterDict = [[NSMutableDictionary alloc] init];
-  NSSet *keySet = [remoteConfig keysWithPrefix:@""];
-  for (NSString *key in keySet) {
-    parameterDict[key] = [self createRemoteConfigValueDict:[remoteConfig configValueForKey:key]];
-  }
-  // Add default parameters if missing since `keysWithPrefix` does not return default keys.
-  NSArray *defaultKeys = [remoteConfig allKeysFromSource:FIRRemoteConfigSourceDefault
-                                               namespace:FIRNamespaceGoogleMobilePlatform];
-  for (NSString *key in defaultKeys) {
-    if ([parameterDict valueForKey:key] == nil) {
-      parameterDict[key] = [self createRemoteConfigValueDict:[remoteConfig configValueForKey:key]];
-    }
-  }
-  return parameterDict;
 }
 
 - (NSString *)mapLastFetchStatus:(FIRRemoteConfigFetchStatus)status {
@@ -162,6 +144,29 @@
   } else {
     return @"static";
   }
+}
+
+#pragma mark - FLTFirebasePlugin
+
+- (void)didReinitializeFirebaseCore:(void (^)(void))completion {
+  completion();
+}
+
+- (NSDictionary *_Nonnull)pluginConstantsForFIRApp:(FIRApp *)firebase_app {
+  FIRRemoteConfig  *firebaseRemoteConfig = [FIRRemoteConfig remoteConfigWithApp:firebase_app];
+  return [self getAllParameters:firebaseRemoteConfig];
+}
+
+- (NSString *_Nonnull)firebaseLibraryName {
+  return LIBRARY_NAME;
+}
+
+- (NSString *_Nonnull)firebaseLibraryVersion {
+  return LIBRARY_VERSION;
+}
+
+- (NSString *_Nonnull)flutterChannelName {
+  return kFirebaseRemoteConfigChannelName;
 }
 
 @end

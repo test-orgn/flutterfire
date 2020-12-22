@@ -3,6 +3,8 @@
 // found in the LICENSE file.
 
 import 'package:firebase_remote_config/firebase_remote_config.dart';
+import 'package:firebase_remote_config_platform_interface/firebase_remote_config_platform_interface.dart';
+import 'package:firebase_remote_config_platform_interface/src/method_channel/method_channel_firebase_remote_config.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -14,7 +16,6 @@ void main() {
     return <String, dynamic>{
       'lastFetchTime': lastFetchTime,
       'lastFetchStatus': 'success',
-      'inDebugMode': true,
       'parameters': <String, dynamic>{
         'param1': <String, dynamic>{
           'source': 'static',
@@ -28,7 +29,7 @@ void main() {
     final List<MethodCall> log = <MethodCall>[];
 
     setUp(() async {
-      RemoteConfig.channel
+      MethodChannelFirebaseRemoteConfig.channel
           .setMockMethodCallHandler((MethodCall methodCall) async {
         log.add(methodCall);
         switch (methodCall.method) {
@@ -48,21 +49,18 @@ void main() {
           isMethodCall('RemoteConfig#instance', arguments: null),
         ],
       );
-      expect(remoteConfig.remoteConfigSettings.debugMode, true);
+      expect(remoteConfig.settings, true);
       expect(remoteConfig.lastFetchTime,
           DateTime.fromMillisecondsSinceEpoch(lastFetchTime));
-      expect(remoteConfig.lastFetchStatus, LastFetchStatus.values[0]);
+      expect(remoteConfig.lastFetchStatus, RemoteConfigFetchStatus.noFetchYet);
     });
 
     test('doubleInstance', () async {
-      final List<Future<RemoteConfig>> futures = <Future<RemoteConfig>>[
+      final List<RemoteConfig> remoteConfigs = <RemoteConfig>[
         RemoteConfig.instance,
         RemoteConfig.instance,
       ];
-      Future.wait(futures).then((List<RemoteConfig> remoteConfigs) {
-        // Check that both returned Remote Config instances are the same.
-        expect(remoteConfigs[0], remoteConfigs[1]);
-      });
+      expect(remoteConfigs[0], remoteConfigs[1]);
     });
   });
 
@@ -73,7 +71,7 @@ void main() {
     RemoteConfig remoteConfig;
 
     setUp(() async {
-      RemoteConfig.channel
+      MethodChannelFirebaseRemoteConfig.channel
           .setMockMethodCallHandler((MethodCall methodCall) async {
         log.add(methodCall);
         switch (methodCall.method) {
@@ -146,22 +144,20 @@ void main() {
     });
 
     test('fetch', () async {
-      await remoteConfig.fetch(expiration: const Duration(hours: 1));
+      await remoteConfig.fetch();
       expect(
         log,
         <Matcher>[
           isMethodCall(
             'RemoteConfig#fetch',
-            arguments: <String, dynamic>{
-              'expiration': 3600,
-            },
+            arguments: null,
           ),
         ],
       );
     });
 
     test('activate', () async {
-      final bool newConfig = await remoteConfig.activateFetched();
+      final bool newConfig = await remoteConfig.activate();
       expect(
         log,
         <Matcher>[
@@ -218,9 +214,8 @@ void main() {
     });
 
     test('setConfigSettings', () async {
-      expect(remoteConfig.remoteConfigSettings.debugMode, true);
       final RemoteConfigSettings remoteConfigSettings =
-          RemoteConfigSettings(debugMode: false);
+          RemoteConfigSettings(Duration(seconds: 10), Duration.zero);
       await remoteConfig.setConfigSettings(remoteConfigSettings);
       expect(
         log,
@@ -228,12 +223,13 @@ void main() {
           isMethodCall(
             'RemoteConfig#setConfigSettings',
             arguments: <String, dynamic>{
-              'debugMode': false,
+              'appName': remoteConfig.app.name,
+              'fetchTimeout': Duration(seconds: 10).inSeconds,
+              'minimumFetchInterval': Duration.zero.inSeconds,
             },
           ),
         ],
       );
-      expect(remoteConfig.remoteConfigSettings.debugMode, false);
     });
   });
 }

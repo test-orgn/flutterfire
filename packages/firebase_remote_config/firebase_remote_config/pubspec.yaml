@@ -7,7 +7,7 @@ version: 0.4.3
 dependencies:
   flutter:
     sdk: flutter
-  firebase_core: ^0.5.2
+  firebase_core: ^0.5.3
   firebase_core_platform_interface: ^2.0.0
   firebase_remote_config_platform_interface:
     path: ../firebase_remote_config_platform_interface
